@@ -2,6 +2,8 @@ package server
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,10 +16,12 @@ import (
 	"github.com/brbarmex/raftx/node"
 )
 
+var ErrorNetConnectionContinueWithFailure = errors.New("listener timeout, retryng")
+
 type Server struct {
 	Node           *node.Node
 	portBind       string
-	peers          *[]string
+	peers          []string
 	failureDelay   time.Duration
 	maxDelayToWait time.Duration
 	listener       net.Listener
@@ -26,54 +30,75 @@ type Server struct {
 func NewServer() *Server {
 
 	srv := &Server{}
-	srv.portBind = "40000"
+	srv.portBind = "4000" . // <<- get here from env
 	srv.maxDelayToWait = 1 * time.Second
 	srv.Node = node.NewNode()
+	srv.peers = []string{}
+	srv.peers = append(srv.peers, "4321") // <<- get here from env
 	return srv
 }
 
 func (s *Server) Start() {
 
-	var err error
-	s.listener, err = net.Listen("tcp", "127.0.0.1:"+s.portBind)
-	if err != nil {
-		log.Fatalln("failure when start server node TCP; eror:", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	defer s.listener.Close()
-	log.Printf("listining on: %s \n", s.listener.Addr().String())
+	go func(ctx context.Context) {
 
-	quitCh := make(chan os.Signal, 1)
-	signal.Notify(quitCh, os.Interrupt, os.Kill, syscall.SIGTERM)
-	s.Node.SetNodeState(node.Follower)
-	go s.Node.ElectionTime()
-
-	for {
-
-		select {
-		case <-quitCh:
-			s.close()
-		default:
-		}
-
-		conn, err := s.accept()
+		l, err := net.Listen("tcp", "127.0.0.1:"+s.portBind)
 		if err != nil {
-			log.Fatalln("failure when accept listener connection; error: ", err.Error())
+			log.Fatalln("failure when start server node TCP; error :: ", err)
 		}
 
-		if conn == nil {
-			continue
+		s.listener = l
+
+		defer s.listener.Close()
+		log.Printf("listining on :: %s \n", s.listener.Addr().String())
+
+		s.Node.SetNodeState(node.Follower)
+		go s.Node.ElectionTime()
+
+		for {
+
+			select {
+			case <-ctx.Done():
+
+				log.Println("close")
+				s.close()
+				return
+
+			default:
+
+				conn, err := s.accept()
+				if err != nil {
+					if errors.Is(err, ErrorNetConnectionContinueWithFailure) {
+						log.Fatalln("failure when accept listener connection; error :: ", err.Error())
+						s.listener.Close()
+						continue
+					}
+				}
+
+				go s.hanlder(conn)
+			}
 		}
 
-		go s.hanlder(conn)
-	}
+	}(ctx)
+
+	exit := make(chan os.Signal, 1)
+	signal.Notify(exit, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGTERM)
+
+	<-exit
+	cancel()
+
+	log.Println("shutdowing server")
+
 }
 
 func (s *Server) hanlder(c net.Conn) {
 
 	defer c.Close()
 
-	fmt.Printf("Receive message %s\n", c.RemoteAddr().String())
+	fmt.Printf("Receive message  ::%s\n", c.RemoteAddr().String())
 	for {
 		netData, err := bufio.NewReader(c).ReadString('\n')
 		if err != nil {
@@ -83,7 +108,6 @@ func (s *Server) hanlder(c net.Conn) {
 
 		temp := strings.TrimSpace(string(netData))
 		fmt.Println(temp)
-		c.Write([]byte(`hi`))
 
 	}
 }
@@ -108,9 +132,9 @@ func (s *Server) accept() (net.Conn, error) {
 			s.failureDelay = s.maxDelayToWait
 		}
 
-		log.Printf("http: Accept error: %s; retryng in %v \n", err.Error(), s.failureDelay)
+		log.Printf("Accept error :: %s; retryng in %v \n", err.Error(), s.failureDelay)
 		time.Sleep(s.failureDelay)
-		return nil, err
+		return nil, ErrorNetConnectionContinueWithFailure
 	}
 
 	if err != nil {
@@ -122,7 +146,7 @@ func (s *Server) accept() (net.Conn, error) {
 
 func (s *Server) close() {
 	s.listener.Close()
+	s.Node.Close()
 	close(s.Node.ResetElectionTimeout)
 	s.Node.ElectionTimeoutTicker.Stop()
-	os.Exit(3)
 }
