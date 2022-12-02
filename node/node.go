@@ -103,9 +103,15 @@ func (node *Node) becomeLeader() {
 	voteRequest := node.buildVoteRequest(node.currentTerm, node.Id, 0, 0)
 	var totalVotesReceived int
 
+	var wg sync.WaitGroup
+
 	for i := range node.peers {
 
+		wg.Add(1)
+
 		go func(msgReq string, peer string) {
+
+			defer wg.Done()
 
 			c, err := net.Dial("tcp", peer)
 			if err != nil {
@@ -152,6 +158,8 @@ func (node *Node) becomeLeader() {
 
 		}(voteRequest, node.peers[i])
 	}
+
+	wg.Wait()
 
 	if node.currentState == Leader {
 		return
