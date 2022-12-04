@@ -23,35 +23,18 @@ const (
 )
 
 type Node struct {
-
-	//Node Id
-	Id string
-
-	//The election timeout is randomized to be between 150ms and 300ms.
-	ElectionTimeoutTicker *time.Ticker
-
+	Id                     string
+	LeaderNodeId           string
+	Peers                  [1]string
+	ElectionTimeoutTicker  *time.Ticker
 	HeartbeatTimeoutTicker *time.Ticker
+	ResetElectionTimeout   chan struct{}
 
-	// Reset election timeout ticker
-	ResetElectionTimeout chan struct{}
-
-	eletionTimeoutInterval int
-
-	//The heartbeat interval, this should be less than election timeout
+	currentState             NodeState
+	eletionTimeoutInterval   int
 	heartbeatTimeoutInterval int
-
-	//The Heartbeat timeout
-	IdleTimeout int
-
-	//The state node
-	currentState NodeState
-
-	//latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	currentTerm int
-
-	Peers [1]string
-
-	LeaderNodeId string
+	IdleTimeout              int
+	currentTerm              int
 
 	rw sync.RWMutex
 }
@@ -81,7 +64,6 @@ func (node *Node) ElectionTime() {
 		case <-node.ElectionTimeoutTicker.C:
 
 			if node.currentState == Follower {
-				node.SetNodeState(Candidate)
 				go node.becomeLeader()
 			}
 
@@ -101,8 +83,9 @@ func (node *Node) resetElectionTimeoutTicker() {
 
 func (node *Node) becomeLeader() {
 
-	node.currentTerm += 1
+	node.SetNodeState(Candidate)
 	node.resetElectionTimeoutTicker()
+	node.currentTerm += 1
 	voteMessageReq := node.buildVoteRequest(node.currentTerm, node.Id, 0, 0)
 
 	var totalVotesReceivedInFavor int
@@ -234,7 +217,6 @@ func (node *Node) heartbeatTime() {
 func (node *Node) Close() {
 
 	close(node.ResetElectionTimeout)
-	node.ElectionTimeoutTicker.Stop()
 	node.ElectionTimeoutTicker.Stop()
 	node.HeartbeatTimeoutTicker.Stop()
 }
