@@ -2,7 +2,10 @@ package node
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"math/rand"
 	"net"
 	"strconv"
@@ -46,9 +49,9 @@ type Node struct {
 	//latest term server has seen (initialized to 0 on first boot, increases monotonically)
 	currentTerm int
 
-	peers []string
+	Peers [1]string
 
-	isLeader bool
+	LeaderNodeId string
 
 	rw sync.RWMutex
 }
@@ -82,7 +85,7 @@ func (node *Node) ElectionTime() {
 				go node.becomeLeader()
 			}
 
-			//fmt.Println("I'm a candidate now")
+			//fmt.Println(node.currentState)
 
 		case <-node.ResetElectionTimeout:
 			node.resetElectionTimeoutTicker()
@@ -100,81 +103,126 @@ func (node *Node) becomeLeader() {
 
 	node.currentTerm += 1
 	node.resetElectionTimeoutTicker()
-	voteRequest := node.buildVoteRequest(node.currentTerm, node.Id, 0, 0)
-	var totalVotesReceived int
+	voteMessageReq := node.buildVoteRequest(node.currentTerm, node.Id, 0, 0)
+	var totalVotesReceivedInFavor int
 
-	var wg sync.WaitGroup
-
-	for i := range node.peers {
-
-		wg.Add(1)
+	for i := range node.Peers {
 
 		go func(msgReq string, peer string) {
 
-			defer wg.Done()
-
 			c, err := net.Dial("tcp", peer)
 			if err != nil {
+				log.Println(err)
 				return
 			}
 
+			// >> sending message to peer
 			c.Write([]byte(msgReq + "\n"))
 
 			go func(c net.Conn) {
 
 				defer c.Close()
-				for {
 
-					data, err := bufio.NewReader(c).ReadString('\n')
-					if err != nil {
-						continue
-					}
+				data, err := bufio.NewReader(c).ReadString('\n')
+				if err != nil {
 
-					msgResp := strings.TrimSpace(string(data))
-					fmt.Println("Received message :: ", string(msgResp))
+					// need implement traitment
+					return
+				}
 
-					splits := strings.Split(msgResp, "|")
-					if len(splits) < 3 || len(splits[0]) == 0 || len(splits[1]) == 0 || len(splits[2]) == 0 {
-						return
-					}
+				msgResp := strings.TrimSpace(string(data))
+				log.Printf("received message from peer %s :: message %s \n", peer, string(msgResp))
 
-					var term int
-					var voteResult bool
+				splits := strings.Split(msgResp, "|")
+				if len(splits) < 3 || len(splits[0]) == 0 || len(splits[1]) == 0 || len(splits[2]) == 0 {
+					return
+				}
 
-					if term, err = strconv.Atoi(splits[2]); err != nil {
-						return
-					}
+				var term int
+				var voteResult bool
 
-					if voteResult, err = strconv.ParseBool(splits[3]); err != nil {
-						return
-					}
+				if term, err = strconv.Atoi(splits[2]); err != nil {
+					return
+				}
 
-					if node.currentState == Candidate && node.currentTerm == term && voteResult {
-						totalVotesReceived += 1
-					}
+				if voteResult, err = strconv.ParseBool(splits[3]); err != nil {
+					return
+				}
+
+				if node.currentState == Candidate && node.currentTerm == term && voteResult {
+					totalVotesReceivedInFavor += 1
 				}
 
 			}(c)
 
-		}(voteRequest, node.peers[i])
+		}(voteMessageReq, node.Peers[i])
 	}
-
-	wg.Wait()
 
 	if node.currentState == Leader {
 		return
 	}
 
-	if totalVotesReceived >= (len(node.peers)+1)/2 {
-		node.SetNodeState(Leader)
+	switch totalVotesReceivedInFavor >= (len(node.Peers)+1)/2 {
+	case true:
 		node.ElectionTimeoutTicker.Stop()
-		node.isLeader = true
+		node.SetNodeState(Leader)
+		node.LeaderNodeId = node.Id
+		go node.heartbeatTime()
+	case false:
+		node.SetNodeState(Follower)
+	default:
+		node.SetNodeState(Follower)
+	}
+}
+
+func (node *Node) HandlerRequest(c net.Conn) {
+
+	defer c.Close()
+
+	netData, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return
+		}
+
+		log.Println("nao consigo ler", err)
+		return
+	}
+
+	temp := strings.TrimSpace(string(netData))
+	log.Println("NODE B :: Received ::", temp)
+	//c.Write([]byte("NODE B :: Received ::" + temp + "\n"))
+
+}
+
+func (node *Node) heartbeatTime() {
+
+	node.HeartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
+	for ticker := range node.HeartbeatTimeoutTicker.C {
+
+		//fmt.Println("sending heartbeat at: ", ticker)
+
+		for i := range node.Peers {
+
+			c, err := net.Dial("tcp", node.Peers[i])
+			if err != nil {
+				log.Panicln("ERRO NO HEARTBEAT ", ticker.String())
+				return
+			}
+
+			c.Write([]byte("RECEBA CARALHO" + "\n"))
+		}
+
 	}
 
 }
 
 func (node *Node) Close() {
+
+	close(node.ResetElectionTimeout)
 	node.ElectionTimeoutTicker.Stop()
+	node.ElectionTimeoutTicker.Stop()
+	node.HeartbeatTimeoutTicker.Stop()
 }
 
 func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, lastLogTerm int) string {
@@ -184,6 +232,7 @@ func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, l
 func NewNode() *Node {
 	node := &Node{}
 	node.Id = "1"
+	node.SetNodeState(Follower)
 	node.SetEletionTimeout()
 	node.SetHeartbeatTimeout()
 	return node
