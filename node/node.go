@@ -104,23 +104,34 @@ func (node *Node) becomeLeader() {
 	node.currentTerm += 1
 	node.resetElectionTimeoutTicker()
 	voteMessageReq := node.buildVoteRequest(node.currentTerm, node.Id, 0, 0)
+
 	var totalVotesReceivedInFavor int
+	var wg sync.WaitGroup
+
+	// I voted for myself and await the consensus of the other peers
+	totalVotesReceivedInFavor += 1
+
+	log.Printf("[TERM:%d] sending request votes to peers that hear to me \n", node.currentTerm)
 
 	for i := range node.Peers {
+
+		wg.Add(i + 1)
 
 		go func(msgReq string, peer string) {
 
 			c, err := net.Dial("tcp", peer)
 			if err != nil {
 				log.Println(err)
+				wg.Done()
 				return
 			}
 
-			// >> sending message to peer
+			log.Printf("[TERM:%d] request vote to peer - : %s \n", node.currentTerm, peer)
 			c.Write([]byte(msgReq + "\n"))
 
 			go func(c net.Conn) {
 
+				defer wg.Done()
 				defer c.Close()
 
 				data, err := bufio.NewReader(c).ReadString('\n')
@@ -131,7 +142,7 @@ func (node *Node) becomeLeader() {
 				}
 
 				msgResp := strings.TrimSpace(string(data))
-				log.Printf("received message from peer %s :: message %s \n", peer, string(msgResp))
+				log.Printf("[TERM:%d] received message from peer %s :: message %s \n", node.currentTerm, peer, string(msgResp))
 
 				splits := strings.Split(msgResp, "|")
 				if len(splits) < 3 || len(splits[0]) == 0 || len(splits[1]) == 0 || len(splits[2]) == 0 {
@@ -158,6 +169,8 @@ func (node *Node) becomeLeader() {
 		}(voteMessageReq, node.Peers[i])
 	}
 
+	wg.Wait()
+
 	if node.currentState == Leader {
 		return
 	}
@@ -168,6 +181,7 @@ func (node *Node) becomeLeader() {
 		node.SetNodeState(Leader)
 		node.LeaderNodeId = node.Id
 		go node.heartbeatTime()
+		log.Printf("[TERM:%d] I was elected the new leader \n", node.currentTerm)
 	case false:
 		node.SetNodeState(Follower)
 	default:
