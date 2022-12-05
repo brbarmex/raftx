@@ -23,18 +23,22 @@ const (
 )
 
 type Node struct {
-	Id                     string
-	LeaderNodeId           string
-	Peers                  [1]string
+	Id           string
+	LeaderNodeId string
+
+	Peers [1]string
+
 	ElectionTimeoutTicker  *time.Ticker
 	HeartbeatTimeoutTicker *time.Ticker
-	ResetElectionTimeout   chan struct{}
+
+	ResetElectionTimeout chan struct{}
 
 	currentState             NodeState
 	eletionTimeoutInterval   int
 	heartbeatTimeoutInterval int
 	IdleTimeout              int
 	currentTerm              int
+	lastCandidateVoted       string
 
 	rw sync.RWMutex
 }
@@ -58,6 +62,13 @@ func (node *Node) SetNodeState(state NodeState) {
 	node.currentState = state
 }
 
+func (node *Node) resetElectionTimeoutTicker() {
+
+	defer node.rw.Unlock()
+	node.rw.Lock()
+	node.ElectionTimeoutTicker.Reset(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
+}
+
 func (node *Node) ElectionTime() {
 	for {
 		select {
@@ -67,18 +78,10 @@ func (node *Node) ElectionTime() {
 				go node.becomeLeader()
 			}
 
-			//fmt.Println(node.currentState)
-
 		case <-node.ResetElectionTimeout:
 			node.resetElectionTimeoutTicker()
 		}
 	}
-}
-
-func (node *Node) resetElectionTimeoutTicker() {
-	defer node.rw.Unlock()
-	node.rw.Lock()
-	node.ElectionTimeoutTicker.Reset(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
 }
 
 func (node *Node) becomeLeader() {
@@ -172,26 +175,6 @@ func (node *Node) becomeLeader() {
 	}
 }
 
-func (node *Node) HandlerRequest(c net.Conn) {
-
-	defer c.Close()
-
-	netData, err := bufio.NewReader(c).ReadString('\n')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return
-		}
-
-		log.Println("nao consigo ler", err)
-		return
-	}
-
-	temp := strings.TrimSpace(string(netData))
-	log.Println("NODE B :: Received ::", temp)
-	//c.Write([]byte("NODE B :: Received ::" + temp + "\n"))
-
-}
-
 func (node *Node) heartbeatTime() {
 
 	node.HeartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
@@ -212,6 +195,63 @@ func (node *Node) heartbeatTime() {
 
 	}
 
+}
+
+func (node *Node) HandlerRequest(c net.Conn) {
+
+	defer c.Close()
+
+	netData, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return
+		}
+
+		log.Println("nao consigo ler", err)
+		return
+	}
+
+	temp := strings.TrimSpace(string(netData))
+	r, _ := node.handlerVoteRequest(temp)
+	c.Write(r)
+
+}
+
+func (node *Node) handlerVoteRequest(messageReceived string) ([]byte, error) {
+
+	splits := strings.Split(messageReceived, "|")
+	if len(splits) < 3 || len(splits[0]) == 0 || len(splits[1]) == 0 || len(splits[2]) == 0 {
+
+		// traitment here
+		return nil, nil
+	}
+
+	var err error
+	var termReq int
+	if termReq, err = strconv.Atoi(splits[2]); err != nil {
+		return nil, nil
+	}
+
+	if termReq > node.currentTerm {
+
+		node.SetNodeState(Follower)
+		node.resetElectionTimeoutTicker()
+		node.HeartbeatTimeoutTicker.Stop()
+		node.currentTerm = termReq
+		node.lastCandidateVoted = ""
+	}
+
+	var candidateId string = splits[3]
+	var msgResponse string = splits[2] + "|" + node.Id + "|"
+
+	if termReq == node.currentTerm && (candidateId == node.lastCandidateVoted || len(node.lastCandidateVoted) == 0) {
+		node.lastCandidateVoted = candidateId
+		msgResponse += "True \n"
+	} else {
+		msgResponse += "False \n"
+	}
+
+	return []byte(msgResponse), nil
 }
 
 func (node *Node) Close() {
