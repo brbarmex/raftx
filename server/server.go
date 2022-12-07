@@ -27,9 +27,11 @@ func NewServer() *Server {
 
 	srv := &Server{}
 	srv.portBind = "127.0.0.1:4000" // <<- get here from env
+	//srv.portBind = "127.0.0.1:9876"
 	srv.maxDelayToWait = 1 * time.Second
 	srv.Node = node.NewNode()
 	srv.Node.Peers[0] = "127.0.0.1:9876" // <<- get here from env
+	//srv.Node.Peers[0] = "127.0.0.1:4000"
 	return srv
 }
 
@@ -70,7 +72,7 @@ func (s *Server) Start() {
 					}
 				}
 
-				go s.Node.HandlerRequest(conn)
+				s.Node.HandlerRequest(conn)
 			}
 		}
 

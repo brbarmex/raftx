@@ -161,6 +161,8 @@ func (node *Node) becomeLeader() {
 		return
 	}
 
+	log.Printf("[TERM:%d] Total votes received in faivor: %d \n",node.currentTerm, totalVotesReceivedInFavor)
+
 	switch totalVotesReceivedInFavor >= (len(node.Peers)+1)/2 {
 	case true:
 		node.ElectionTimeoutTicker.Stop()
@@ -180,17 +182,17 @@ func (node *Node) heartbeatTime() {
 	node.HeartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
 	for ticker := range node.HeartbeatTimeoutTicker.C {
 
-		//fmt.Println("sending heartbeat at: ", ticker)
+		fmt.Println("sending heartbeat at: ")
 
 		for i := range node.Peers {
 
 			c, err := net.Dial("tcp", node.Peers[i])
 			if err != nil {
-				log.Panicln("ERRO NO HEARTBEAT ", ticker.String())
+				log.Printf("ERRO NO HEARTBEAT %s \n", ticker.String())
 				return
 			}
 
-			c.Write([]byte("RECEBA CARALHO" + "\n"))
+			c.Write([]byte("heartbeat" + "\n"))
 		}
 
 	}
@@ -199,9 +201,7 @@ func (node *Node) heartbeatTime() {
 
 func (node *Node) HandlerRequest(c net.Conn) {
 
-	defer c.Close()
-
-	netData, err := bufio.NewReader(c).ReadString('\n')
+	msg, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return
@@ -211,38 +211,54 @@ func (node *Node) HandlerRequest(c net.Conn) {
 		return
 	}
 
-	temp := strings.TrimSpace(string(netData))
-	r, _ := node.handlerVoteRequest(temp)
-	c.Write(r)
+	result := strings.Split(strings.TrimSpace(msg), "|")[0]
+	switch result {
+	case "vote-request":
+		temp := strings.TrimSpace(string(msg))
+		node.voteRequestUseCase(temp, c)
+	case "heartbeat":
+		node.SetNodeState(Follower)
+		node.resetElectionTimeoutTicker()
+		node.currentTerm = 0
+		node.lastCandidateVoted = ""
+	default:
+		log.Println(msg)
+		c.Close()
+	}
 
 }
 
-func (node *Node) handlerVoteRequest(messageReceived string) ([]byte, error) {
+func (node *Node) voteRequestUseCase(messageReceived string, c net.Conn) {
+
+	defer c.Close()
+
+	log.Println(messageReceived)
 
 	splits := strings.Split(messageReceived, "|")
 	if len(splits) < 3 || len(splits[0]) == 0 || len(splits[1]) == 0 || len(splits[2]) == 0 {
 
+		log.Println(messageReceived)
 		// traitment here
-		return nil, nil
+		return
 	}
 
 	var err error
 	var termReq int
 	if termReq, err = strconv.Atoi(splits[2]); err != nil {
-		return nil, nil
+		return
 	}
 
 	if termReq > node.currentTerm {
 
 		node.SetNodeState(Follower)
 		node.resetElectionTimeoutTicker()
-		node.HeartbeatTimeoutTicker.Stop()
+		//node.HeartbeatTimeoutTicker.Stop()
 		node.currentTerm = termReq
 		node.lastCandidateVoted = ""
 	}
 
 	var candidateId string = splits[3]
-	var msgResponse string = splits[2] + "|" + node.Id + "|"
+	var msgResponse string = "vote-response|" + splits[2] + "|" + node.Id + "|"
 
 	if termReq == node.currentTerm && (candidateId == node.lastCandidateVoted || len(node.lastCandidateVoted) == 0) {
 		node.lastCandidateVoted = candidateId
@@ -251,7 +267,7 @@ func (node *Node) handlerVoteRequest(messageReceived string) ([]byte, error) {
 		msgResponse += "False \n"
 	}
 
-	return []byte(msgResponse), nil
+	c.Write([]byte(msgResponse))
 }
 
 func (node *Node) Close() {
@@ -262,7 +278,7 @@ func (node *Node) Close() {
 }
 
 func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, lastLogTerm int) string {
-	return fmt.Sprintf("vote|%d|%s|%d|%d", term, candidateId, lastLogIndex, lastLogTerm)
+	return fmt.Sprintf("vote-request|%d|%s|%d|%d", term, candidateId, lastLogIndex, lastLogTerm)
 }
 
 func NewNode() *Node {
