@@ -25,12 +25,15 @@ type Server struct {
 
 func NewServer() *Server {
 
+	var peers []string
+	peers[0] = "127.0.0.1:9876"
+
 	srv := &Server{}
 	srv.portBind = "127.0.0.1:4000" // <<- get here from env
 	//srv.portBind = "127.0.0.1:9876"
 	srv.maxDelayToWait = 1 * time.Second
-	srv.Node = node.NewNode()
-	srv.Node.Peers[0] = "127.0.0.1:9876" // <<- get here from env
+	srv.Node = node.NewNode("1", peers)
+	//srv.Node.Peers[0] = "127.0.0.1:9876" // <<- get here from env
 	//srv.Node.Peers[0] = "127.0.0.1:4000"
 	return srv
 }
