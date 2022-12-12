@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 type NodeState int
@@ -26,12 +28,11 @@ type Node struct {
 	id           string
 	leaderNodeId string
 
-	Peers [1]string
+	peers []string
 
-	electionTimeoutTicker  *time.Ticker
-	heartbeatTimeoutTicker *time.Ticker
-
-	resetElectionTimeoutChn chan struct{}
+	electionTimeoutTickerReset chan struct{}
+	electionTimeoutTicker      *time.Ticker
+	heartbeatTimeoutTicker     *time.Ticker
 
 	currentNodeState         NodeState
 	eletionTimeoutInterval   int
@@ -43,7 +44,7 @@ type Node struct {
 	rw sync.RWMutex
 }
 
-func (node *Node) SetEletionTimeout() {
+func (node *Node) setEletionTimeout() {
 
 	var min, max int = 149, 302
 	rand.Seed(time.Now().UnixNano())
@@ -51,7 +52,7 @@ func (node *Node) SetEletionTimeout() {
 	node.electionTimeoutTicker = time.NewTicker(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
 }
 
-func (node *Node) SetHeartbeatTimeout() {
+func (node *Node) setHeartbeatTimeout() {
 	node.heartbeatTimeoutInterval = 100
 }
 
@@ -73,21 +74,6 @@ func (node *Node) resetElectionTimeoutTicker() {
 
 }
 
-func (node *Node) ElectionTime() {
-	for {
-		select {
-		case <-node.electionTimeoutTicker.C:
-
-			if node.currentNodeState == Follower {
-				go node.becomeLeader()
-			}
-
-		case <-node.resetElectionTimeoutChn:
-			node.resetElectionTimeoutTicker()
-		}
-	}
-}
-
 func (node *Node) becomeLeader() {
 
 	node.currentTerm += 1
@@ -98,7 +84,7 @@ func (node *Node) becomeLeader() {
 	var totalVotesReceivedInFavor int
 	var wg sync.WaitGroup
 
-	for i := range node.Peers {
+	for i := range node.peers {
 
 		wg.Add(i + 1)
 
@@ -158,7 +144,7 @@ func (node *Node) becomeLeader() {
 				totalVotesReceivedInFavor += 1
 			}
 
-		}(voteRequest, node.Peers[i])
+		}(voteRequest, node.peers[i])
 	}
 
 	wg.Wait()
@@ -172,7 +158,7 @@ func (node *Node) becomeLeader() {
 
 	log.Printf("[TERM:%d] total votes received in faivor: %d \n", node.currentTerm, totalVotesReceivedInFavor)
 
-	if totalVotesReceivedInFavor >= (len(node.Peers)+1)/2 {
+	if totalVotesReceivedInFavor >= (len(node.peers)+1)/2 {
 
 		log.Printf("[TERM:%d] Node: %s was elected the new leader \n", node.currentTerm, node.id)
 		node.electionTimeoutTicker.Stop()
@@ -189,7 +175,6 @@ func (node *Node) becomeLeader() {
 
 		node.setNodeState(Follower)
 	}
-
 }
 
 func (node *Node) heartbeatTime() {
@@ -197,49 +182,37 @@ func (node *Node) heartbeatTime() {
 	node.heartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
 	for ticker := range node.heartbeatTimeoutTicker.C {
 
-		for i := range node.Peers {
+		for i := range node.peers {
 
-			c, err := net.Dial("tcp", node.Peers[i])
+			c, err := net.Dial("tcp", node.peers[i])
 			if err != nil {
 				log.Printf("ERRO NO HEARTBEAT %s \n", ticker.String())
 				continue
 			}
 
-			fmt.Printf("sending heartbeat to peer: %s \n", node.Peers[i])
+			fmt.Printf("sending heartbeat to peer: %s \n", node.peers[i])
 			c.Write([]byte("heartbeat" + "\n"))
 		}
-
 	}
-
 }
 
-func (node *Node) HandlerRequest(c net.Conn) {
+func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, lastLogTerm int) string {
+	return fmt.Sprintf("vote-request|%d|%s|%d|%d", term, candidateId, lastLogIndex, lastLogTerm)
+}
 
-	msg, err := bufio.NewReader(c).ReadString('\n')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return
+func (node *Node) ElectionTime() {
+	for {
+		select {
+		case <-node.electionTimeoutTicker.C:
+
+			if node.currentNodeState == Follower {
+				go node.becomeLeader()
+			}
+
+		case <-node.electionTimeoutTickerReset:
+			node.resetElectionTimeoutTicker()
 		}
-
-		log.Println("nao consigo ler", err)
-		return
 	}
-
-	result := strings.Split(strings.TrimSpace(msg), "|")[0]
-	switch result {
-	case "vote-request":
-		node.voteRequestUseCase(strings.TrimSpace(string(msg)), c)
-	case "heartbeat":
-		log.Println("received signal heartbeat")
-		node.setNodeState(Follower)
-		node.resetElectionTimeoutTicker()
-		node.currentTerm = 0
-		node.lastCandidateVoted = ""
-	default:
-		log.Println(msg)
-		c.Close()
-	}
-
 }
 
 func (node *Node) voteRequestUseCase(messageReceived string, c net.Conn) {
@@ -292,9 +265,38 @@ func (node *Node) voteRequestUseCase(messageReceived string, c net.Conn) {
 	c.Write([]byte(msgResponse))
 }
 
+func (node *Node) HandlerRequest(c net.Conn) {
+
+	msg, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return
+		}
+
+		log.Println("nao consigo ler", err)
+		return
+	}
+
+	result := strings.Split(strings.TrimSpace(msg), "|")[0]
+	switch result {
+	case "vote-request":
+		node.voteRequestUseCase(strings.TrimSpace(string(msg)), c)
+	case "heartbeat":
+		log.Println("received signal heartbeat")
+		node.setNodeState(Follower)
+		node.resetElectionTimeoutTicker()
+		node.currentTerm = 0
+		node.lastCandidateVoted = ""
+	default:
+		log.Println(msg)
+		c.Close()
+	}
+
+}
+
 func (node *Node) Close() {
 
-	close(node.resetElectionTimeoutChn)
+	close(node.electionTimeoutTickerReset)
 	node.electionTimeoutTicker.Stop()
 	if node.heartbeatTimeoutTicker != nil {
 		node.heartbeatTimeoutTicker.Stop()
@@ -302,15 +304,25 @@ func (node *Node) Close() {
 
 }
 
-func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, lastLogTerm int) string {
-	return fmt.Sprintf("vote-request|%d|%s|%d|%d", term, candidateId, lastLogIndex, lastLogTerm)
-}
+func NewNode(cfg *viper.Viper) *Node {
 
-func NewNode(nodeId string, peers []string) *Node {
+	p := viper.GetString("peers")
+	peerslipt := strings.Split(p, ",")
+
+	if len(peerslipt) == 0 {
+		panic("peers cannot be zero")
+	}
+
+	log.Printf("Peers load from env [%v]", peerslipt)
+
+	_peers := make([]string, 0, len(peerslipt))
+	_peers = append(_peers, peerslipt...)
+
 	node := &Node{}
-	node.id = nodeId
+	node.id = cfg.GetString("app.node-id")
+	node.peers = _peers
 	node.setNodeState(Follower)
-	node.SetEletionTimeout()
-	node.SetHeartbeatTimeout()
+	node.setEletionTimeout()
+	node.setHeartbeatTimeout()
 	return node
 }
