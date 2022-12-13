@@ -39,6 +39,8 @@ func (s *Server) Start() {
 
 	go func(ctx context.Context) {
 
+		log.Printf("port load from env: %s \n",s.address)
+
 		l, err := net.Listen("tcp", s.address)
 		if err != nil {
 			log.Fatalln(err)
@@ -105,6 +107,7 @@ func (s *Server) accept() (net.Conn, error) {
 }
 
 func (s *Server) close() {
+	log.Println("close server ...")
 	s.listener.Close()
 	s.node.Close()
 }

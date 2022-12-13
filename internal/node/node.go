@@ -84,9 +84,11 @@ func (node *Node) becomeLeader() {
 	var totalVotesReceivedInFavor int
 	var wg sync.WaitGroup
 
+	log.Printf("NODE:%s try become leader at TERM:%d \n", node.id, node.currentTerm)
+
 	for i := range node.peers {
 
-		wg.Add(i + 1)
+		wg.Add(1)
 
 		go func(msgReq string, peer string) {
 
@@ -117,6 +119,7 @@ func (node *Node) becomeLeader() {
 				len(splitRequest[0]) == 0 ||
 				len(splitRequest[1]) == 0 ||
 				len(splitRequest[2]) == 0 {
+				log.Printf("invalid response \n")
 				return
 			}
 
@@ -155,6 +158,7 @@ func (node *Node) becomeLeader() {
 
 	// I voted for myself and await the consensus of the other peers
 	totalVotesReceivedInFavor += 1
+	node.lastCandidateVoted = node.id
 
 	log.Printf("[TERM:%d] total votes received in faivor: %d \n", node.currentTerm, totalVotesReceivedInFavor)
 
@@ -178,6 +182,8 @@ func (node *Node) becomeLeader() {
 }
 
 func (node *Node) heartbeatTime() {
+
+	log.Printf("[TERM: %d] start heartbeat proccess time \n", node.currentTerm)
 
 	node.heartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
 	for ticker := range node.heartbeatTimeoutTicker.C {

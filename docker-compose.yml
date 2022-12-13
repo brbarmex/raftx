@@ -1,0 +1,34 @@
+version: '3.2'
+
+networks:
+  raftx_raft:
+    driver: bridge
+
+services:
+
+  le1:
+    image: raft:v0.1.0
+    environment:
+      - APP_NODEID=1
+      - APP_ADDRESS=0.0.0.0:4371
+      - PEERS=le2:4372,le3:4373
+    networks:
+      - raftx_raft
+
+  le2:
+    image: raft:v0.1.0
+    environment:
+      - APP_NODEID=2
+      - APP_ADDRESS=0.0.0.0:4372
+      - PEERS=le1:4371,le3:4373
+    networks:
+      - raftx_raft
+
+  le3:
+    image: raft:v0.1.0   
+    environment:
+      - APP_NODEID=3
+      - APP_ADDRESS=0.0.0.0:4373
+      - PEERS=le1:4371,le2:4372
+    networks:
+      - raftx_raft        
