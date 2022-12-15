@@ -12,66 +12,44 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/spf13/viper"
-)
-
-type NodeState int
-
-const (
-	Follower NodeState = iota + 1
-	Candidate
-	Leader
 )
 
 type Node struct {
-	id           string
-	leaderNodeId string
+	id            string
+	leaderNodeId  string
+	currentLeader bool
 
+	state NodeState
 	peers []string
 
 	electionTimeoutTickerReset chan struct{}
 	electionTimeoutTicker      *time.Ticker
 	heartbeatTimeoutTicker     *time.Ticker
 
-	currentNodeState         NodeState
 	eletionTimeoutInterval   int
 	heartbeatTimeoutInterval int
-	IdleTimeout              int
 	currentTerm              int
 	lastCandidateVoted       string
 
 	rw sync.RWMutex
 }
 
-func (node *Node) setEletionTimeout() {
-
-	var min, max int = 149, 302
-	rand.Seed(time.Now().UnixNano())
-	node.eletionTimeoutInterval = rand.Intn(max-min) + min
-	node.electionTimeoutTicker = time.NewTicker(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
-}
-
-func (node *Node) setHeartbeatTimeout() {
-	node.heartbeatTimeoutInterval = 100
+func (node *Node) Close() {
+	close(node.electionTimeoutTickerReset)
+	node.electionTimeoutTicker.Stop()
+	node.heartbeatTimeoutTicker.Stop()
 }
 
 func (node *Node) setNodeState(state NodeState) {
-
 	defer node.rw.Unlock()
 	node.rw.Lock()
-	node.currentNodeState = state
+	node.state = state
 }
 
 func (node *Node) resetElectionTimeoutTicker() {
-
 	defer node.rw.Unlock()
 	node.rw.Lock()
-
-	if node.electionTimeoutTicker != nil {
-		node.electionTimeoutTicker.Reset(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
-	}
-
+	node.electionTimeoutTicker.Reset(time.Duration(node.eletionTimeoutInterval) * time.Millisecond)
 }
 
 func (node *Node) becomeLeader() {
@@ -79,62 +57,41 @@ func (node *Node) becomeLeader() {
 	node.currentTerm += 1
 	node.setNodeState(Candidate)
 	node.resetElectionTimeoutTicker()
-	voteRequest := node.buildVoteRequest(node.currentTerm, node.id, 0, 0)
+	voteRequest := buildVoteRequest(node.currentTerm, node.id, 0, 0)
 
-	var totalVotesReceivedInFavor int
+	log.Printf("[NODE:%s] is CANDIDATE and will try become leader at TERM: %d \n", node.id, node.currentTerm)
+
+	var votesReceived int
 	var wg sync.WaitGroup
-
-	log.Printf("NODE:%s try become leader at TERM:%d \n", node.id, node.currentTerm)
 
 	for i := range node.peers {
 
 		wg.Add(1)
 
-		go func(msgReq string, peer string) {
+		go func(voteRequest string, peer string) {
 
 			defer wg.Done()
 
-			c, err := net.Dial("tcp", peer)
+			log.Printf("[TERM:%d] send vote request to peer: %s \n", node.currentTerm, peer)
+
+			data, err := requestVoteToPeer(peer, voteRequest)
 			if err != nil {
-				log.Println(err)
+				log.Printf("[TERM:%d] failed to request vote to peer:%s - error: %s \n", node.currentTerm, peer, err.Error())
 				return
 			}
 
-			defer c.Close()
+			log.Printf("[TERM:%d] received vote from peer:%s - result: %s \n", node.currentTerm, peer, data)
 
-			log.Printf("[TERM:%d] sending request vote to peer: %s \n", node.currentTerm, peer)
-			c.Write([]byte(msgReq + "\n"))
-
-			data, err := bufio.NewReader(c).ReadString('\n')
+			term, nodeId, voteResult, err := responseFromVoteRequest(data)
 			if err != nil {
-
-				log.Printf("[TERM:%d] failed to send request to peer %s; error: %s \n", node.currentTerm, peer, err.Error())
+				log.Printf("[TERM:%d] invalid response received from peer:%s - err: %s \n", node.currentTerm, peer, err.Error())
 				return
 			}
 
-			log.Printf("[TERM:%d] received message from peer %s; message: %s \n", node.currentTerm, peer, data)
-
-			splitRequest := strings.Split(strings.TrimSpace(string(data)), "|")
-			if len(splitRequest) < 3 ||
-				len(splitRequest[0]) == 0 ||
-				len(splitRequest[1]) == 0 ||
-				len(splitRequest[2]) == 0 {
-				log.Printf("invalid response \n")
-				return
-			}
-
-			term, err := strconv.Atoi(splitRequest[2])
-			if err != nil {
-				return
-			}
-
-			voteResult, err := strconv.ParseBool(splitRequest[3])
-			if err != nil {
-				return
-			}
+			log.Printf("[TERM:%d] The NODE-ID:%s voted:%v at term:%d \n", node.currentTerm, nodeId, voteResult, term)
 
 			if term > node.currentTerm {
-				if node.currentNodeState != Leader {
+				if node.state != Leader {
 					node.resetElectionTimeoutTicker()
 				}
 				node.setNodeState(Follower)
@@ -143,8 +100,8 @@ func (node *Node) becomeLeader() {
 
 			}
 
-			if node.currentNodeState == Candidate && node.currentTerm == term && voteResult {
-				totalVotesReceivedInFavor += 1
+			if node.state == Candidate && node.currentTerm == term && voteResult {
+				votesReceived += 1
 			}
 
 		}(voteRequest, node.peers[i])
@@ -152,38 +109,37 @@ func (node *Node) becomeLeader() {
 
 	wg.Wait()
 
-	if node.currentNodeState == Leader {
+	if node.state == Leader {
 		return
 	}
 
 	// I voted for myself and await the consensus of the other peers
-	totalVotesReceivedInFavor += 1
+	votesReceived += 1
 	node.lastCandidateVoted = node.id
 
-	log.Printf("[TERM:%d] total votes received in faivor: %d \n", node.currentTerm, totalVotesReceivedInFavor)
+	log.Printf("[TERM:%d] total votes received in faivor: %d \n", node.currentTerm, votesReceived)
 
-	if totalVotesReceivedInFavor >= (len(node.peers)+1)/2 {
+	if votesReceived >= (len(node.peers)+1)/2 {
 
 		log.Printf("[TERM:%d] Node: %s was elected the new leader \n", node.currentTerm, node.id)
 		node.electionTimeoutTicker.Stop()
 		node.setNodeState(Leader)
 		node.leaderNodeId = node.id
+		node.currentLeader = true
 		go node.heartbeatTime()
 
 	} else {
 
 		log.Printf("[TERM:%d] Node: %s was not elected the new leader \n", node.currentTerm, node.id)
-		if node.heartbeatTimeoutTicker != nil {
-			node.heartbeatTimeoutTicker.Stop()
-		}
-
+		node.heartbeatTimeoutTicker.Stop()
 		node.setNodeState(Follower)
+		node.currentLeader = false
 	}
 }
 
 func (node *Node) heartbeatTime() {
 
-	log.Printf("[TERM: %d] start heartbeat proccess time \n", node.currentTerm)
+	log.Printf("[TERM: %d][NODE: %s] start heartbeat proccess time \n", node.currentTerm, node.id)
 
 	node.heartbeatTimeoutTicker = time.NewTicker(time.Duration(node.heartbeatTimeoutInterval) * time.Millisecond)
 	for ticker := range node.heartbeatTimeoutTicker.C {
@@ -196,14 +152,10 @@ func (node *Node) heartbeatTime() {
 				continue
 			}
 
-			fmt.Printf("sending heartbeat to peer: %s \n", node.peers[i])
-			c.Write([]byte("heartbeat" + "\n"))
+			fmt.Printf("[TERM:%d][NODE:%s] I'm still the round leader; sending heartbeat to peer: %s \n", node.currentTerm, node.id, node.peers[i])
+			c.Write([]byte(fmt.Sprintf("heartbeat|the NODE:%s is a leader at TERM:%d \n", node.id, node.currentTerm)))
 		}
 	}
-}
-
-func (node *Node) buildVoteRequest(term int, candidateId string, lastLogIndex, lastLogTerm int) string {
-	return fmt.Sprintf("vote-request|%d|%s|%d|%d", term, candidateId, lastLogIndex, lastLogTerm)
 }
 
 func (node *Node) ElectionTime() {
@@ -211,7 +163,7 @@ func (node *Node) ElectionTime() {
 		select {
 		case <-node.electionTimeoutTicker.C:
 
-			if node.currentNodeState == Follower {
+			if node.state == Follower {
 				go node.becomeLeader()
 			}
 
@@ -235,29 +187,27 @@ func (node *Node) voteRequestUseCase(messageReceived string, c net.Conn) {
 		return
 	}
 
-	termReq, err := strconv.Atoi(splits[2])
+	termReq, err := strconv.Atoi(splits[1])
 	if err != nil {
 		return
 	}
 
-	if node.currentNodeState == Leader {
-		c.Write([]byte(fmt.Sprintf("vote-response|%s|%s|false \n", splits[2], node.id)))
+	if node.state == Leader {
+		c.Write([]byte(fmt.Sprintf("vote-response|%s|%s|false \n", splits[1], node.id)))
 		return
 	}
 
 	if termReq > node.currentTerm {
 
-		if node.heartbeatTimeoutTicker != nil {
-			node.heartbeatTimeoutTicker.Stop()
-		}
-
+		node.heartbeatTimeoutTicker.Stop()
 		node.setNodeState(Follower)
 		node.resetElectionTimeoutTicker()
 		node.currentTerm = termReq
 		node.lastCandidateVoted = ""
+		node.currentLeader = false
 	}
 
-	var candidateId string = splits[3]
+	var candidateId string = splits[2]
 	var voteResponse string
 
 	if termReq == node.currentTerm && (candidateId == node.lastCandidateVoted || len(node.lastCandidateVoted) == 0) {
@@ -267,7 +217,7 @@ func (node *Node) voteRequestUseCase(messageReceived string, c net.Conn) {
 		voteResponse = "False"
 	}
 
-	var msgResponse string = "vote-response|" + splits[2] + "|" + node.id + "|" + voteResponse + "\n"
+	var msgResponse string = "vote-response|" + splits[1] + "|" + node.id + "|" + voteResponse + "\n"
 	c.Write([]byte(msgResponse))
 }
 
@@ -297,38 +247,26 @@ func (node *Node) HandlerRequest(c net.Conn) {
 		log.Println(msg)
 		c.Close()
 	}
-
 }
 
-func (node *Node) Close() {
+func NewNode(nodeId string, peers []string) *Node {
 
-	close(node.electionTimeoutTickerReset)
-	node.electionTimeoutTicker.Stop()
-	if node.heartbeatTimeoutTicker != nil {
-		node.heartbeatTimeoutTicker.Stop()
+	var min, max int = 149, 302
+	rand.Seed(time.Now().UnixNano())
+	timeoutInterval := rand.Intn(max-min) + min
+
+	return &Node{
+		id:                         nodeId,
+		leaderNodeId:               "",
+		lastCandidateVoted:         "",
+		peers:                      peers,
+		electionTimeoutTickerReset: make(chan struct{}),
+		electionTimeoutTicker:      time.NewTicker(time.Duration(timeoutInterval) * time.Millisecond),
+		heartbeatTimeoutTicker:     &time.Ticker{},
+		state:                      Follower,
+		eletionTimeoutInterval:     timeoutInterval,
+		heartbeatTimeoutInterval:   100,
+		currentTerm:                0,
+		rw:                         sync.RWMutex{},
 	}
-
-}
-
-func NewNode(cfg *viper.Viper) *Node {
-
-	p := viper.GetString("peers")
-	peerslipt := strings.Split(p, ",")
-
-	if len(peerslipt) == 0 {
-		panic("peers cannot be zero")
-	}
-
-	log.Printf("Peers load from env [%v]", peerslipt)
-
-	_peers := make([]string, 0, len(peerslipt))
-	_peers = append(_peers, peerslipt...)
-
-	node := &Node{}
-	node.id = cfg.GetString("app.node-id")
-	node.peers = _peers
-	node.setNodeState(Follower)
-	node.setEletionTimeout()
-	node.setHeartbeatTimeout()
-	return node
 }
